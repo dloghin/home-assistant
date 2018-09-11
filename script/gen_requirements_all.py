@@ -11,7 +11,7 @@ COMMENT_REQUIREMENTS = (
     'RPi.GPIO',
     'raspihats',
     'rpi-rf',
-    'Adafruit_Python_DHT',
+    'Adafruit-DHT',
     'Adafruit_BBIO',
     'fritzconnection',
     'pybluez',
@@ -34,6 +34,7 @@ COMMENT_REQUIREMENTS = (
     'credstash',
     'bme680',
     'homekit',
+    'py_noaa',
 )
 
 TEST_REQUIREMENTS = (
@@ -50,6 +51,7 @@ TEST_REQUIREMENTS = (
     'feedparser',
     'foobot_async',
     'gTTS-token',
+    'hangups',
     'HAP-python',
     'ha-ffmpeg',
     'haversine',
@@ -72,11 +74,13 @@ TEST_REQUIREMENTS = (
     'pyblackbird',
     'pydeconz',
     'pydispatcher',
-    'PyJWT',
     'pylitejet',
     'pymonoprice',
     'pynx584',
+    'pyopenuv',
+    'pyotp',
     'pyqwikswitch',
+    'PyRMVtransport',
     'python-forecastio',
     'python-nest',
     'pytradfri\[async\]',
@@ -93,7 +97,6 @@ TEST_REQUIREMENTS = (
     'sqlalchemy',
     'statsd',
     'uvcclient',
-    'voluptuous-serialize',
     'warrant',
     'yahoo-finance',
     'pythonwhois',
@@ -103,7 +106,8 @@ TEST_REQUIREMENTS = (
 
 IGNORE_PACKAGES = (
     'homeassistant.components.recorder.models',
-    'homeassistant.components.homekit.*'
+    'homeassistant.components.homekit.*',
+    'homeassistant.components.hangouts.hangups_utils'
 )
 
 IGNORE_PIN = ('colorlog>2.1,<3', 'keyring>=9.3,<10.0', 'urllib3')
@@ -119,6 +123,8 @@ URL_PIN = ('https://home-assistant.io/developers/code_review_platform/'
 CONSTRAINT_PATH = os.path.join(os.path.dirname(__file__),
                                '../homeassistant/package_constraints.txt')
 CONSTRAINT_BASE = """
+pycryptodome>=3.6.6
+
 # Breaks Python 3.6 and is not needed for our supported Python versions
 enum34==1000000000.0.0
 
@@ -154,7 +160,7 @@ def core_requirements():
 
 
 def comment_requirement(req):
-    """Some requirements don't install on all systems."""
+    """Comment out requirement. Some don't install on all systems."""
     return any(ign in req for ign in COMMENT_REQUIREMENTS)
 
 
@@ -164,8 +170,10 @@ def gather_modules():
 
     errors = []
 
-    for package in sorted(explore_module('homeassistant.components', True) +
-                          explore_module('homeassistant.scripts', True)):
+    for package in sorted(
+            explore_module('homeassistant.components', True) +
+            explore_module('homeassistant.scripts', True) +
+            explore_module('homeassistant.auth', True)):
         try:
             module = importlib.import_module(package)
         except ImportError:
@@ -291,7 +299,7 @@ def validate_constraints_file(data):
 
 
 def main(validate):
-    """Main section of the script."""
+    """Run the script."""
     if not os.path.isfile('requirements_all.txt'):
         print('Run this from HA root dir')
         return 1

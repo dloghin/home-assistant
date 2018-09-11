@@ -109,7 +109,7 @@ def show_setup_message(hass, pincode):
     """Display persistent notification with setup information."""
     pin = pincode.decode()
     _LOGGER.info('Pincode: %s', pin)
-    message = 'To setup Home Assistant in the Home App, enter the ' \
+    message = 'To set up Home Assistant in the Home App, enter the ' \
               'following code:\n### {}'.format(pin)
     hass.components.persistent_notification.create(
         message, 'HomeKit Setup', HOMEKIT_NOTIFY_ID)
@@ -142,10 +142,10 @@ def density_to_air_quality(density):
     """Map PM2.5 density to HomeKit AirQuality level."""
     if density <= 35:
         return 1
-    elif density <= 75:
+    if density <= 75:
         return 2
-    elif density <= 115:
+    if density <= 115:
         return 3
-    elif density <= 150:
+    if density <= 150:
         return 4
     return 5

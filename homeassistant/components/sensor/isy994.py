@@ -236,7 +236,7 @@ UOM_TO_STATES = {
 
 
 def setup_platform(hass, config: ConfigType,
-                   add_devices: Callable[[list], None], discovery_info=None):
+                   add_entities: Callable[[list], None], discovery_info=None):
     """Set up the ISY994 sensor platform."""
     devices = []
 
@@ -247,7 +247,7 @@ def setup_platform(hass, config: ConfigType,
     for node in hass.data[ISY994_WEATHER]:
         devices.append(ISYWeatherDevice(node))
 
-    add_devices(devices)
+    add_entities(devices)
 
 
 class ISYSensorDevice(ISYDevice):
@@ -262,10 +262,8 @@ class ISYSensorDevice(ISYDevice):
                 if friendly_name in (TEMP_CELSIUS, TEMP_FAHRENHEIT):
                     friendly_name = self.hass.config.units.temperature_unit
                 return friendly_name
-            else:
-                return self._node.uom[0]
-        else:
-            return None
+            return self._node.uom[0]
+        return None
 
     @property
     def state(self) -> str:

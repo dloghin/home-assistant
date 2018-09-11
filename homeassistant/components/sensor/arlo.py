@@ -43,7 +43,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend({
 })
 
 
-def setup_platform(hass, config, add_devices, discovery_info=None):
+def setup_platform(hass, config, add_entities, discovery_info=None):
     """Set up an Arlo IP sensor."""
     arlo = hass.data.get(DATA_ARLO)
     if not arlo:
@@ -70,7 +70,7 @@ def setup_platform(hass, config, add_devices, discovery_info=None):
                         SENSOR_TYPES[sensor_type][0], base_station.name)
                     sensors.append(ArloSensor(name, base_station, sensor_type))
 
-    add_devices(sensors, True)
+    add_entities(sensors, True)
 
 
 class ArloSensor(Entity):
@@ -123,7 +123,7 @@ class ArloSensor(Entity):
         """Return the device class of the sensor."""
         if self._sensor_type == 'temperature':
             return DEVICE_CLASS_TEMPERATURE
-        elif self._sensor_type == 'humidity':
+        if self._sensor_type == 'humidity':
             return DEVICE_CLASS_HUMIDITY
         return None
 

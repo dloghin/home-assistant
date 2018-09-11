@@ -164,7 +164,7 @@ def setup_platform(hass, config, add_entities, discovery_info=None):
     data = PyNUTData(host, port, alias, username, password)
 
     if data.status is None:
-        _LOGGER.error("NUT Sensor has no data, unable to setup")
+        _LOGGER.error("NUT Sensor has no data, unable to set up")
         raise PlatformNotReady
 
     _LOGGER.debug('NUT Sensors Available: %s', data.status)
@@ -236,13 +236,12 @@ class NUTSensor(Entity):
         """Return UPS display state."""
         if self._data.status is None:
             return STATE_TYPES['OFF']
-        else:
-            try:
-                return " ".join(
-                    STATE_TYPES[state]
-                    for state in self._data.status[KEY_STATUS].split())
-            except KeyError:
-                return STATE_UNKNOWN
+        try:
+            return " ".join(
+                STATE_TYPES[state]
+                for state in self._data.status[KEY_STATUS].split())
+        except KeyError:
+            return STATE_UNKNOWN
 
     def update(self):
         """Get the latest status and use it to update our sensor state."""
