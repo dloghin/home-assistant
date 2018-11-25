@@ -1,10 +1,23 @@
 """Fixtures for component testing."""
+from unittest.mock import patch
+
 import pytest
 
+from homeassistant.auth.const import GROUP_ID_ADMIN, GROUP_ID_READ_ONLY
 from homeassistant.setup import async_setup_component
-from homeassistant.components import websocket_api
+from homeassistant.components.websocket_api.http import URL
+from homeassistant.components.websocket_api.auth import (
+    TYPE_AUTH, TYPE_AUTH_OK, TYPE_AUTH_REQUIRED)
 
-from tests.common import MockUser, CLIENT_ID
+from tests.common import MockUser, CLIENT_ID, mock_coro
+
+
+@pytest.fixture(autouse=True)
+def prevent_io():
+    """Fixture to prevent certain I/O from happening."""
+    with patch('homeassistant.components.http.ban.async_load_ip_bans_config',
+               side_effect=lambda *args: mock_coro([])):
+        yield
 
 
 @pytest.fixture
@@ -12,27 +25,52 @@ def hass_ws_client(aiohttp_client):
     """Websocket client fixture connected to websocket server."""
     async def create_client(hass, access_token=None):
         """Create a websocket client."""
-        wapi = hass.components.websocket_api
         assert await async_setup_component(hass, 'websocket_api')
 
         client = await aiohttp_client(hass.http.app)
-        websocket = await client.ws_connect(wapi.URL)
-        auth_resp = await websocket.receive_json()
 
-        if auth_resp['type'] == wapi.TYPE_AUTH_OK:
-            assert access_token is None, \
-                'Access token given but no auth required'
-            return websocket
+        patches = []
 
-        assert access_token is not None, 'Access token required for fixture'
+        if access_token is None:
+            patches.append(patch(
+                'homeassistant.auth.AuthManager.active', return_value=False))
+            patches.append(patch(
+                'homeassistant.auth.AuthManager.support_legacy',
+                return_value=True))
+            patches.append(patch(
+                'homeassistant.components.websocket_api.auth.'
+                'validate_password', return_value=True))
+        else:
+            patches.append(patch(
+                'homeassistant.auth.AuthManager.active', return_value=True))
+            patches.append(patch(
+                'homeassistant.components.http.auth.setup_auth'))
 
-        await websocket.send_json({
-            'type': websocket_api.TYPE_AUTH,
-            'access_token': access_token
-        })
+        for p in patches:
+            p.start()
 
-        auth_ok = await websocket.receive_json()
-        assert auth_ok['type'] == wapi.TYPE_AUTH_OK
+        try:
+            websocket = await client.ws_connect(URL)
+            auth_resp = await websocket.receive_json()
+            assert auth_resp['type'] == TYPE_AUTH_REQUIRED
+
+            if access_token is None:
+                await websocket.send_json({
+                    'type': TYPE_AUTH,
+                    'api_password': 'bla'
+                })
+            else:
+                await websocket.send_json({
+                    'type': TYPE_AUTH,
+                    'access_token': access_token
+                })
+
+            auth_ok = await websocket.receive_json()
+            assert auth_ok['type'] == TYPE_AUTH_OK
+
+        finally:
+            for p in patches:
+                p.stop()
 
         # wrap in client
         websocket.client = client
@@ -48,3 +86,19 @@ def hass_access_token(hass):
     refresh_token = hass.loop.run_until_complete(
         hass.auth.async_create_refresh_token(user, CLIENT_ID))
     yield hass.auth.async_create_access_token(refresh_token)
+
+
+@pytest.fixture
+def hass_admin_user(hass):
+    """Return a Home Assistant admin user."""
+    admin_group = hass.loop.run_until_complete(hass.auth.async_get_group(
+        GROUP_ID_ADMIN))
+    return MockUser(groups=[admin_group]).add_to_hass(hass)
+
+
+@pytest.fixture
+def hass_read_only_user(hass):
+    """Return a Home Assistant read only user."""
+    read_only_group = hass.loop.run_until_complete(hass.auth.async_get_group(
+        GROUP_ID_READ_ONLY))
+    return MockUser(groups=[read_only_group]).add_to_hass(hass)

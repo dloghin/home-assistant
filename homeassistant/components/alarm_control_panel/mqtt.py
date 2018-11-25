@@ -4,7 +4,6 @@ This platform enables the possibility to control a MQTT alarm.
 For more details about this platform, please refer to the documentation at
 https://home-assistant.io/components/alarm_control_panel.mqtt/
 """
-import asyncio
 import logging
 import re
 
@@ -18,10 +17,13 @@ from homeassistant.const import (
     STATE_ALARM_PENDING, STATE_ALARM_TRIGGERED, STATE_UNKNOWN,
     CONF_NAME, CONF_CODE)
 from homeassistant.components.mqtt import (
-    CONF_AVAILABILITY_TOPIC, CONF_STATE_TOPIC, CONF_COMMAND_TOPIC,
-    CONF_PAYLOAD_AVAILABLE, CONF_PAYLOAD_NOT_AVAILABLE, CONF_QOS,
-    CONF_RETAIN, MqttAvailability)
+    ATTR_DISCOVERY_HASH, CONF_AVAILABILITY_TOPIC, CONF_STATE_TOPIC,
+    CONF_COMMAND_TOPIC, CONF_PAYLOAD_AVAILABLE, CONF_PAYLOAD_NOT_AVAILABLE,
+    CONF_QOS, CONF_RETAIN, MqttAvailability, MqttDiscoveryUpdate, subscription)
+from homeassistant.components.mqtt.discovery import MQTT_DISCOVERY_NEW
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.typing import HomeAssistantType, ConfigType
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -46,53 +48,92 @@ PLATFORM_SCHEMA = mqtt.MQTT_BASE_PLATFORM_SCHEMA.extend({
 }).extend(mqtt.MQTT_AVAILABILITY_SCHEMA.schema)
 
 
-@asyncio.coroutine
-def async_setup_platform(hass, config, async_add_entities,
-                         discovery_info=None):
+async def async_setup_platform(hass: HomeAssistantType, config: ConfigType,
+                               async_add_entities, discovery_info=None):
+    """Set up MQTT alarm control panel through configuration.yaml."""
+    await _async_setup_entity(hass, config, async_add_entities)
+
+
+async def async_setup_entry(hass, config_entry, async_add_entities):
+    """Set up MQTT alarm control panel dynamically through MQTT discovery."""
+    async def async_discover(discovery_payload):
+        """Discover and add an MQTT alarm control panel."""
+        config = PLATFORM_SCHEMA(discovery_payload)
+        await _async_setup_entity(hass, config, async_add_entities,
+                                  discovery_payload[ATTR_DISCOVERY_HASH])
+
+    async_dispatcher_connect(
+        hass, MQTT_DISCOVERY_NEW.format(alarm.DOMAIN, 'mqtt'),
+        async_discover)
+
+
+async def _async_setup_entity(hass, config, async_add_entities,
+                              discovery_hash=None):
     """Set up the MQTT Alarm Control Panel platform."""
-    if discovery_info is not None:
-        config = PLATFORM_SCHEMA(discovery_info)
-
     async_add_entities([MqttAlarm(
-        config.get(CONF_NAME),
-        config.get(CONF_STATE_TOPIC),
-        config.get(CONF_COMMAND_TOPIC),
-        config.get(CONF_QOS),
-        config.get(CONF_RETAIN),
-        config.get(CONF_PAYLOAD_DISARM),
-        config.get(CONF_PAYLOAD_ARM_HOME),
-        config.get(CONF_PAYLOAD_ARM_AWAY),
-        config.get(CONF_CODE),
-        config.get(CONF_AVAILABILITY_TOPIC),
-        config.get(CONF_PAYLOAD_AVAILABLE),
-        config.get(CONF_PAYLOAD_NOT_AVAILABLE))])
+        config,
+        discovery_hash,)])
 
 
-class MqttAlarm(MqttAvailability, alarm.AlarmControlPanel):
+class MqttAlarm(MqttAvailability, MqttDiscoveryUpdate,
+                alarm.AlarmControlPanel):
     """Representation of a MQTT alarm status."""
 
-    def __init__(self, name, state_topic, command_topic, qos, retain,
-                 payload_disarm, payload_arm_home, payload_arm_away, code,
-                 availability_topic, payload_available, payload_not_available):
+    def __init__(self, config, discovery_hash):
         """Init the MQTT Alarm Control Panel."""
-        super().__init__(availability_topic, qos, payload_available,
-                         payload_not_available)
         self._state = STATE_UNKNOWN
-        self._name = name
-        self._state_topic = state_topic
-        self._command_topic = command_topic
-        self._qos = qos
-        self._retain = retain
-        self._payload_disarm = payload_disarm
-        self._payload_arm_home = payload_arm_home
-        self._payload_arm_away = payload_arm_away
-        self._code = code
+        self._config = config
+        self._sub_state = None
 
-    @asyncio.coroutine
-    def async_added_to_hass(self):
+        self._name = None
+        self._state_topic = None
+        self._command_topic = None
+        self._qos = None
+        self._retain = None
+        self._payload_disarm = None
+        self._payload_arm_home = None
+        self._payload_arm_away = None
+        self._code = None
+
+        # Load config
+        self._setup_from_config(config)
+
+        availability_topic = config.get(CONF_AVAILABILITY_TOPIC)
+        payload_available = config.get(CONF_PAYLOAD_AVAILABLE)
+        payload_not_available = config.get(CONF_PAYLOAD_NOT_AVAILABLE)
+        MqttAvailability.__init__(self, availability_topic, self._qos,
+                                  payload_available, payload_not_available)
+        MqttDiscoveryUpdate.__init__(self, discovery_hash,
+                                     self.discovery_update)
+
+    async def async_added_to_hass(self):
         """Subscribe mqtt events."""
-        yield from super().async_added_to_hass()
+        await MqttAvailability.async_added_to_hass(self)
+        await MqttDiscoveryUpdate.async_added_to_hass(self)
+        await self._subscribe_topics()
 
+    async def discovery_update(self, discovery_payload):
+        """Handle updated discovery message."""
+        config = PLATFORM_SCHEMA(discovery_payload)
+        self._setup_from_config(config)
+        await self.availability_discovery_update(config)
+        await self._subscribe_topics()
+        self.async_schedule_update_ha_state()
+
+    def _setup_from_config(self, config):
+        """(Re)Setup the entity."""
+        self._name = config.get(CONF_NAME)
+        self._state_topic = config.get(CONF_STATE_TOPIC)
+        self._command_topic = config.get(CONF_COMMAND_TOPIC)
+        self._qos = config.get(CONF_QOS)
+        self._retain = config.get(CONF_RETAIN)
+        self._payload_disarm = config.get(CONF_PAYLOAD_DISARM)
+        self._payload_arm_home = config.get(CONF_PAYLOAD_ARM_HOME)
+        self._payload_arm_away = config.get(CONF_PAYLOAD_ARM_AWAY)
+        self._code = config.get(CONF_CODE)
+
+    async def _subscribe_topics(self):
+        """(Re)Subscribe to topics."""
         @callback
         def message_received(topic, payload, qos):
             """Run when new MQTT message has been received."""
@@ -104,8 +145,16 @@ class MqttAlarm(MqttAvailability, alarm.AlarmControlPanel):
             self._state = payload
             self.async_schedule_update_ha_state()
 
-        yield from mqtt.async_subscribe(
-            self.hass, self._state_topic, message_received, self._qos)
+        self._sub_state = await subscription.async_subscribe_topics(
+            self.hass, self._sub_state,
+            {'state_topic': {'topic': self._state_topic,
+                             'msg_callback': message_received,
+                             'qos': self._qos}})
+
+    async def async_will_remove_from_hass(self):
+        """Unsubscribe when removed."""
+        await subscription.async_unsubscribe_topics(self.hass, self._sub_state)
+        await MqttAvailability.async_will_remove_from_hass(self)
 
     @property
     def should_poll(self):
@@ -131,8 +180,7 @@ class MqttAlarm(MqttAvailability, alarm.AlarmControlPanel):
             return 'Number'
         return 'Any'
 
-    @asyncio.coroutine
-    def async_alarm_disarm(self, code=None):
+    async def async_alarm_disarm(self, code=None):
         """Send disarm command.
 
         This method is a coroutine.
@@ -143,8 +191,7 @@ class MqttAlarm(MqttAvailability, alarm.AlarmControlPanel):
             self.hass, self._command_topic, self._payload_disarm, self._qos,
             self._retain)
 
-    @asyncio.coroutine
-    def async_alarm_arm_home(self, code=None):
+    async def async_alarm_arm_home(self, code=None):
         """Send arm home command.
 
         This method is a coroutine.
@@ -155,8 +202,7 @@ class MqttAlarm(MqttAvailability, alarm.AlarmControlPanel):
             self.hass, self._command_topic, self._payload_arm_home, self._qos,
             self._retain)
 
-    @asyncio.coroutine
-    def async_alarm_arm_away(self, code=None):
+    async def async_alarm_arm_away(self, code=None):
         """Send arm away command.
 
         This method is a coroutine.

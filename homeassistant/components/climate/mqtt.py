@@ -4,13 +4,12 @@ Support for MQTT climate devices.
 For more details about this platform, please refer to the documentation
 https://home-assistant.io/components/climate.mqtt/
 """
-import asyncio
 import logging
 
 import voluptuous as vol
 
 from homeassistant.core import callback
-from homeassistant.components import mqtt
+from homeassistant.components import mqtt, climate
 
 from homeassistant.components.climate import (
     STATE_HEAT, STATE_COOL, STATE_DRY, STATE_FAN_ONLY, ClimateDevice,
@@ -21,9 +20,14 @@ from homeassistant.components.climate import (
 from homeassistant.const import (
     STATE_ON, STATE_OFF, ATTR_TEMPERATURE, CONF_NAME, CONF_VALUE_TEMPLATE)
 from homeassistant.components.mqtt import (
-    CONF_AVAILABILITY_TOPIC, CONF_QOS, CONF_RETAIN, CONF_PAYLOAD_AVAILABLE,
-    CONF_PAYLOAD_NOT_AVAILABLE, MQTT_BASE_PLATFORM_SCHEMA, MqttAvailability)
+    ATTR_DISCOVERY_HASH, CONF_AVAILABILITY_TOPIC, CONF_QOS, CONF_RETAIN,
+    CONF_PAYLOAD_AVAILABLE, CONF_PAYLOAD_NOT_AVAILABLE,
+    MQTT_BASE_PLATFORM_SCHEMA, MqttAvailability, MqttDiscoveryUpdate,
+    subscription)
+from homeassistant.components.mqtt.discovery import MQTT_DISCOVERY_NEW
 import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.typing import HomeAssistantType, ConfigType
 from homeassistant.components.fan import (SPEED_LOW, SPEED_MEDIUM,
                                           SPEED_HIGH)
 
@@ -72,6 +76,19 @@ CONF_SEND_IF_OFF = 'send_if_off'
 
 CONF_MIN_TEMP = 'min_temp'
 CONF_MAX_TEMP = 'max_temp'
+CONF_TEMP_STEP = 'temp_step'
+
+TEMPLATE_KEYS = (
+    CONF_POWER_STATE_TEMPLATE,
+    CONF_MODE_STATE_TEMPLATE,
+    CONF_TEMPERATURE_STATE_TEMPLATE,
+    CONF_FAN_MODE_STATE_TEMPLATE,
+    CONF_SWING_MODE_STATE_TEMPLATE,
+    CONF_AWAY_MODE_STATE_TEMPLATE,
+    CONF_HOLD_STATE_TEMPLATE,
+    CONF_AUX_STATE_TEMPLATE,
+    CONF_CURRENT_TEMPERATURE_TEMPLATE
+)
 
 SCHEMA_BASE = CLIMATE_PLATFORM_SCHEMA.extend(MQTT_BASE_PLATFORM_SCHEMA.schema)
 PLATFORM_SCHEMA = SCHEMA_BASE.extend({
@@ -121,125 +138,169 @@ PLATFORM_SCHEMA = SCHEMA_BASE.extend({
     vol.Optional(CONF_PAYLOAD_OFF, default="OFF"): cv.string,
 
     vol.Optional(CONF_MIN_TEMP, default=DEFAULT_MIN_TEMP): vol.Coerce(float),
-    vol.Optional(CONF_MAX_TEMP, default=DEFAULT_MAX_TEMP): vol.Coerce(float)
+    vol.Optional(CONF_MAX_TEMP, default=DEFAULT_MAX_TEMP): vol.Coerce(float),
+    vol.Optional(CONF_TEMP_STEP, default=1.0): vol.Coerce(float)
 
 }).extend(mqtt.MQTT_AVAILABILITY_SCHEMA.schema)
 
 
-@asyncio.coroutine
-def async_setup_platform(hass, config, async_add_entities,
-                         discovery_info=None):
+async def async_setup_platform(hass: HomeAssistantType, config: ConfigType,
+                               async_add_entities, discovery_info=None):
+    """Set up MQTT climate device through configuration.yaml."""
+    await _async_setup_entity(hass, config, async_add_entities)
+
+
+async def async_setup_entry(hass, config_entry, async_add_entities):
+    """Set up MQTT climate device dynamically through MQTT discovery."""
+    async def async_discover(discovery_payload):
+        """Discover and add a MQTT climate device."""
+        config = PLATFORM_SCHEMA(discovery_payload)
+        await _async_setup_entity(hass, config, async_add_entities,
+                                  discovery_payload[ATTR_DISCOVERY_HASH])
+
+    async_dispatcher_connect(
+        hass, MQTT_DISCOVERY_NEW.format(climate.DOMAIN, 'mqtt'),
+        async_discover)
+
+
+async def _async_setup_entity(hass, config, async_add_entities,
+                              discovery_hash=None):
     """Set up the MQTT climate devices."""
-    if discovery_info is not None:
-        config = PLATFORM_SCHEMA(discovery_info)
-
-    template_keys = (
-        CONF_POWER_STATE_TEMPLATE,
-        CONF_MODE_STATE_TEMPLATE,
-        CONF_TEMPERATURE_STATE_TEMPLATE,
-        CONF_FAN_MODE_STATE_TEMPLATE,
-        CONF_SWING_MODE_STATE_TEMPLATE,
-        CONF_AWAY_MODE_STATE_TEMPLATE,
-        CONF_HOLD_STATE_TEMPLATE,
-        CONF_AUX_STATE_TEMPLATE,
-        CONF_CURRENT_TEMPERATURE_TEMPLATE
-    )
-    value_templates = {}
-    if CONF_VALUE_TEMPLATE in config:
-        value_template = config.get(CONF_VALUE_TEMPLATE)
-        value_template.hass = hass
-        value_templates = {key: value_template for key in template_keys}
-    for key in template_keys & config.keys():
-        value_templates[key] = config.get(key)
-        value_templates[key].hass = hass
-
     async_add_entities([
         MqttClimate(
             hass,
-            config.get(CONF_NAME),
-            {
-                key: config.get(key) for key in (
-                    CONF_POWER_COMMAND_TOPIC,
-                    CONF_MODE_COMMAND_TOPIC,
-                    CONF_TEMPERATURE_COMMAND_TOPIC,
-                    CONF_FAN_MODE_COMMAND_TOPIC,
-                    CONF_SWING_MODE_COMMAND_TOPIC,
-                    CONF_AWAY_MODE_COMMAND_TOPIC,
-                    CONF_HOLD_COMMAND_TOPIC,
-                    CONF_AUX_COMMAND_TOPIC,
-                    CONF_POWER_STATE_TOPIC,
-                    CONF_MODE_STATE_TOPIC,
-                    CONF_TEMPERATURE_STATE_TOPIC,
-                    CONF_FAN_MODE_STATE_TOPIC,
-                    CONF_SWING_MODE_STATE_TOPIC,
-                    CONF_AWAY_MODE_STATE_TOPIC,
-                    CONF_HOLD_STATE_TOPIC,
-                    CONF_AUX_STATE_TOPIC,
-                    CONF_CURRENT_TEMPERATURE_TOPIC
-                )
-            },
-            value_templates,
-            config.get(CONF_QOS),
-            config.get(CONF_RETAIN),
-            config.get(CONF_MODE_LIST),
-            config.get(CONF_FAN_MODE_LIST),
-            config.get(CONF_SWING_MODE_LIST),
-            config.get(CONF_INITIAL),
-            False, None, SPEED_LOW,
-            STATE_OFF, STATE_OFF, False,
-            config.get(CONF_SEND_IF_OFF),
-            config.get(CONF_PAYLOAD_ON),
-            config.get(CONF_PAYLOAD_OFF),
-            config.get(CONF_AVAILABILITY_TOPIC),
-            config.get(CONF_PAYLOAD_AVAILABLE),
-            config.get(CONF_PAYLOAD_NOT_AVAILABLE),
-            config.get(CONF_MIN_TEMP),
-            config.get(CONF_MAX_TEMP))
-    ])
+            config,
+            discovery_hash,
+        )])
 
 
-class MqttClimate(MqttAvailability, ClimateDevice):
+class MqttClimate(MqttAvailability, MqttDiscoveryUpdate, ClimateDevice):
     """Representation of an MQTT climate device."""
 
-    def __init__(self, hass, name, topic, value_templates, qos, retain,
-                 mode_list, fan_mode_list, swing_mode_list,
-                 target_temperature, away, hold, current_fan_mode,
-                 current_swing_mode, current_operation, aux, send_if_off,
-                 payload_on, payload_off, availability_topic,
-                 payload_available, payload_not_available,
-                 min_temp, max_temp):
+    def __init__(self, hass, config, discovery_hash):
         """Initialize the climate device."""
-        super().__init__(availability_topic, qos, payload_available,
-                         payload_not_available)
-        self.hass = hass
-        self._name = name
-        self._topic = topic
-        self._value_templates = value_templates
-        self._qos = qos
-        self._retain = retain
-        self._target_temperature = target_temperature
-        self._unit_of_measurement = hass.config.units.temperature_unit
-        self._away = away
-        self._hold = hold
-        self._current_temperature = None
-        self._current_fan_mode = current_fan_mode
-        self._current_operation = current_operation
-        self._aux = aux
-        self._current_swing_mode = current_swing_mode
-        self._fan_list = fan_mode_list
-        self._operation_list = mode_list
-        self._swing_list = swing_mode_list
-        self._target_temperature_step = 1
-        self._send_if_off = send_if_off
-        self._payload_on = payload_on
-        self._payload_off = payload_off
-        self._min_temp = min_temp
-        self._max_temp = max_temp
+        self._config = config
+        self._sub_state = None
 
-    @asyncio.coroutine
-    def async_added_to_hass(self):
+        self.hass = hass
+        self._name = None
+        self._topic = None
+        self._value_templates = None
+        self._qos = None
+        self._retain = None
+        self._target_temperature = None
+        self._current_fan_mode = None
+        self._current_operation = None
+        self._current_swing_mode = None
+        self._unit_of_measurement = hass.config.units.temperature_unit
+        self._away = False
+        self._hold = None
+        self._current_temperature = None
+        self._aux = False
+        self._fan_list = None
+        self._operation_list = None
+        self._swing_list = None
+        self._target_temperature_step = None
+        self._send_if_off = None
+        self._payload_on = None
+        self._payload_off = None
+        self._min_temp = None
+        self._max_temp = None
+
+        # Load config
+        self._setup_from_config(config)
+
+        availability_topic = config.get(CONF_AVAILABILITY_TOPIC)
+        payload_available = config.get(CONF_PAYLOAD_AVAILABLE)
+        payload_not_available = config.get(CONF_PAYLOAD_NOT_AVAILABLE)
+
+        MqttAvailability.__init__(self, availability_topic, self._qos,
+                                  payload_available, payload_not_available)
+        MqttDiscoveryUpdate.__init__(self, discovery_hash,
+                                     self.discovery_update)
+
+    async def async_added_to_hass(self):
         """Handle being added to home assistant."""
-        yield from super().async_added_to_hass()
+        await MqttAvailability.async_added_to_hass(self)
+        await MqttDiscoveryUpdate.async_added_to_hass(self)
+        await self._subscribe_topics()
+
+    async def discovery_update(self, discovery_payload):
+        """Handle updated discovery message."""
+        config = PLATFORM_SCHEMA(discovery_payload)
+        self._setup_from_config(config)
+        await self.availability_discovery_update(config)
+        await self._subscribe_topics()
+        self.async_schedule_update_ha_state()
+
+    def _setup_from_config(self, config):
+        """(Re)Setup the entity."""
+        self._name = config.get(CONF_NAME)
+        self._topic = {
+            key: config.get(key) for key in (
+                CONF_POWER_COMMAND_TOPIC,
+                CONF_MODE_COMMAND_TOPIC,
+                CONF_TEMPERATURE_COMMAND_TOPIC,
+                CONF_FAN_MODE_COMMAND_TOPIC,
+                CONF_SWING_MODE_COMMAND_TOPIC,
+                CONF_AWAY_MODE_COMMAND_TOPIC,
+                CONF_HOLD_COMMAND_TOPIC,
+                CONF_AUX_COMMAND_TOPIC,
+                CONF_POWER_STATE_TOPIC,
+                CONF_MODE_STATE_TOPIC,
+                CONF_TEMPERATURE_STATE_TOPIC,
+                CONF_FAN_MODE_STATE_TOPIC,
+                CONF_SWING_MODE_STATE_TOPIC,
+                CONF_AWAY_MODE_STATE_TOPIC,
+                CONF_HOLD_STATE_TOPIC,
+                CONF_AUX_STATE_TOPIC,
+                CONF_CURRENT_TEMPERATURE_TOPIC
+            )
+        }
+        self._qos = config.get(CONF_QOS)
+        self._retain = config.get(CONF_RETAIN)
+        self._operation_list = config.get(CONF_MODE_LIST)
+        self._fan_list = config.get(CONF_FAN_MODE_LIST)
+        self._swing_list = config.get(CONF_SWING_MODE_LIST)
+
+        # set to None in non-optimistic mode
+        self._target_temperature = self._current_fan_mode = \
+            self._current_operation = self._current_swing_mode = None
+        if self._topic[CONF_TEMPERATURE_STATE_TOPIC] is None:
+            self._target_temperature = config.get(CONF_INITIAL)
+        if self._topic[CONF_FAN_MODE_STATE_TOPIC] is None:
+            self._current_fan_mode = SPEED_LOW
+        if self._topic[CONF_SWING_MODE_STATE_TOPIC] is None:
+            self._current_swing_mode = STATE_OFF
+        if self._topic[CONF_MODE_STATE_TOPIC] is None:
+            self._current_operation = STATE_OFF
+        self._away = False
+        self._hold = None
+        self._aux = False
+        self._send_if_off = config.get(CONF_SEND_IF_OFF)
+        self._payload_on = config.get(CONF_PAYLOAD_ON)
+        self._payload_off = config.get(CONF_PAYLOAD_OFF)
+        self._min_temp = config.get(CONF_MIN_TEMP)
+        self._max_temp = config.get(CONF_MAX_TEMP)
+        self._target_temperature_step = config.get(CONF_TEMP_STEP)
+
+        config.get(CONF_AVAILABILITY_TOPIC)
+        config.get(CONF_PAYLOAD_AVAILABLE)
+        config.get(CONF_PAYLOAD_NOT_AVAILABLE)
+
+        value_templates = {}
+        if CONF_VALUE_TEMPLATE in config:
+            value_template = config.get(CONF_VALUE_TEMPLATE)
+            value_template.hass = self.hass
+            value_templates = {key: value_template for key in TEMPLATE_KEYS}
+        for key in TEMPLATE_KEYS & config.keys():
+            value_templates[key] = config.get(key)
+            value_templates[key].hass = self.hass
+        self._value_templates = value_templates
+
+    async def _subscribe_topics(self):
+        """(Re)Subscribe to topics."""
+        topics = {}
 
         @callback
         def handle_current_temp_received(topic, payload, qos):
@@ -256,9 +317,10 @@ class MqttClimate(MqttAvailability, ClimateDevice):
                 _LOGGER.error("Could not parse temperature from %s", payload)
 
         if self._topic[CONF_CURRENT_TEMPERATURE_TOPIC] is not None:
-            yield from mqtt.async_subscribe(
-                self.hass, self._topic[CONF_CURRENT_TEMPERATURE_TOPIC],
-                handle_current_temp_received, self._qos)
+            topics[CONF_CURRENT_TEMPERATURE_TOPIC] = {
+                'topic': self._topic[CONF_CURRENT_TEMPERATURE_TOPIC],
+                'msg_callback': handle_current_temp_received,
+                'qos': self._qos}
 
         @callback
         def handle_mode_received(topic, payload, qos):
@@ -274,9 +336,10 @@ class MqttClimate(MqttAvailability, ClimateDevice):
                 self.async_schedule_update_ha_state()
 
         if self._topic[CONF_MODE_STATE_TOPIC] is not None:
-            yield from mqtt.async_subscribe(
-                self.hass, self._topic[CONF_MODE_STATE_TOPIC],
-                handle_mode_received, self._qos)
+            topics[CONF_MODE_STATE_TOPIC] = {
+                'topic': self._topic[CONF_MODE_STATE_TOPIC],
+                'msg_callback': handle_mode_received,
+                'qos': self._qos}
 
         @callback
         def handle_temperature_received(topic, payload, qos):
@@ -293,9 +356,10 @@ class MqttClimate(MqttAvailability, ClimateDevice):
                 _LOGGER.error("Could not parse temperature from %s", payload)
 
         if self._topic[CONF_TEMPERATURE_STATE_TOPIC] is not None:
-            yield from mqtt.async_subscribe(
-                self.hass, self._topic[CONF_TEMPERATURE_STATE_TOPIC],
-                handle_temperature_received, self._qos)
+            topics[CONF_TEMPERATURE_STATE_TOPIC] = {
+                'topic': self._topic[CONF_TEMPERATURE_STATE_TOPIC],
+                'msg_callback': handle_temperature_received,
+                'qos': self._qos}
 
         @callback
         def handle_fan_mode_received(topic, payload, qos):
@@ -312,9 +376,10 @@ class MqttClimate(MqttAvailability, ClimateDevice):
                 self.async_schedule_update_ha_state()
 
         if self._topic[CONF_FAN_MODE_STATE_TOPIC] is not None:
-            yield from mqtt.async_subscribe(
-                self.hass, self._topic[CONF_FAN_MODE_STATE_TOPIC],
-                handle_fan_mode_received, self._qos)
+            topics[CONF_FAN_MODE_STATE_TOPIC] = {
+                'topic': self._topic[CONF_FAN_MODE_STATE_TOPIC],
+                'msg_callback': handle_fan_mode_received,
+                'qos': self._qos}
 
         @callback
         def handle_swing_mode_received(topic, payload, qos):
@@ -331,9 +396,10 @@ class MqttClimate(MqttAvailability, ClimateDevice):
                 self.async_schedule_update_ha_state()
 
         if self._topic[CONF_SWING_MODE_STATE_TOPIC] is not None:
-            yield from mqtt.async_subscribe(
-                self.hass, self._topic[CONF_SWING_MODE_STATE_TOPIC],
-                handle_swing_mode_received, self._qos)
+            topics[CONF_SWING_MODE_STATE_TOPIC] = {
+                'topic': self._topic[CONF_SWING_MODE_STATE_TOPIC],
+                'msg_callback': handle_swing_mode_received,
+                'qos': self._qos}
 
         @callback
         def handle_away_mode_received(topic, payload, qos):
@@ -357,9 +423,10 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self.async_schedule_update_ha_state()
 
         if self._topic[CONF_AWAY_MODE_STATE_TOPIC] is not None:
-            yield from mqtt.async_subscribe(
-                self.hass, self._topic[CONF_AWAY_MODE_STATE_TOPIC],
-                handle_away_mode_received, self._qos)
+            topics[CONF_AWAY_MODE_STATE_TOPIC] = {
+                'topic': self._topic[CONF_AWAY_MODE_STATE_TOPIC],
+                'msg_callback': handle_away_mode_received,
+                'qos': self._qos}
 
         @callback
         def handle_aux_mode_received(topic, payload, qos):
@@ -382,9 +449,10 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self.async_schedule_update_ha_state()
 
         if self._topic[CONF_AUX_STATE_TOPIC] is not None:
-            yield from mqtt.async_subscribe(
-                self.hass, self._topic[CONF_AUX_STATE_TOPIC],
-                handle_aux_mode_received, self._qos)
+            topics[CONF_AUX_STATE_TOPIC] = {
+                'topic': self._topic[CONF_AUX_STATE_TOPIC],
+                'msg_callback': handle_aux_mode_received,
+                'qos': self._qos}
 
         @callback
         def handle_hold_mode_received(topic, payload, qos):
@@ -397,9 +465,19 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self.async_schedule_update_ha_state()
 
         if self._topic[CONF_HOLD_STATE_TOPIC] is not None:
-            yield from mqtt.async_subscribe(
-                self.hass, self._topic[CONF_HOLD_STATE_TOPIC],
-                handle_hold_mode_received, self._qos)
+            topics[CONF_HOLD_STATE_TOPIC] = {
+                'topic': self._topic[CONF_HOLD_STATE_TOPIC],
+                'msg_callback': handle_hold_mode_received,
+                'qos': self._qos}
+
+        self._sub_state = await subscription.async_subscribe_topics(
+            self.hass, self._sub_state,
+            topics)
+
+    async def async_will_remove_from_hass(self):
+        """Unsubscribe when removed."""
+        await subscription.async_unsubscribe_topics(self.hass, self._sub_state)
+        await MqttAvailability.async_will_remove_from_hass(self)
 
     @property
     def should_poll(self):
@@ -466,12 +544,11 @@ class MqttClimate(MqttAvailability, ClimateDevice):
         """Return the list of available fan modes."""
         return self._fan_list
 
-    @asyncio.coroutine
-    def async_set_temperature(self, **kwargs):
+    async def async_set_temperature(self, **kwargs):
         """Set new target temperatures."""
         if kwargs.get(ATTR_OPERATION_MODE) is not None:
             operation_mode = kwargs.get(ATTR_OPERATION_MODE)
-            yield from self.async_set_operation_mode(operation_mode)
+            await self.async_set_operation_mode(operation_mode)
 
         if kwargs.get(ATTR_TEMPERATURE) is not None:
             if self._topic[CONF_TEMPERATURE_STATE_TOPIC] is None:
@@ -485,8 +562,7 @@ class MqttClimate(MqttAvailability, ClimateDevice):
 
         self.async_schedule_update_ha_state()
 
-    @asyncio.coroutine
-    def async_set_swing_mode(self, swing_mode):
+    async def async_set_swing_mode(self, swing_mode):
         """Set new swing mode."""
         if self._send_if_off or self._current_operation != STATE_OFF:
             mqtt.async_publish(
@@ -497,8 +573,7 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self._current_swing_mode = swing_mode
             self.async_schedule_update_ha_state()
 
-    @asyncio.coroutine
-    def async_set_fan_mode(self, fan_mode):
+    async def async_set_fan_mode(self, fan_mode):
         """Set new target temperature."""
         if self._send_if_off or self._current_operation != STATE_OFF:
             mqtt.async_publish(
@@ -509,8 +584,7 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self._current_fan_mode = fan_mode
             self.async_schedule_update_ha_state()
 
-    @asyncio.coroutine
-    def async_set_operation_mode(self, operation_mode) -> None:
+    async def async_set_operation_mode(self, operation_mode) -> None:
         """Set new operation mode."""
         if self._topic[CONF_POWER_COMMAND_TOPIC] is not None:
             if (self._current_operation == STATE_OFF and
@@ -543,8 +617,7 @@ class MqttClimate(MqttAvailability, ClimateDevice):
         """List of available swing modes."""
         return self._swing_list
 
-    @asyncio.coroutine
-    def async_turn_away_mode_on(self):
+    async def async_turn_away_mode_on(self):
         """Turn away mode on."""
         if self._topic[CONF_AWAY_MODE_COMMAND_TOPIC] is not None:
             mqtt.async_publish(self.hass,
@@ -555,8 +628,7 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self._away = True
             self.async_schedule_update_ha_state()
 
-    @asyncio.coroutine
-    def async_turn_away_mode_off(self):
+    async def async_turn_away_mode_off(self):
         """Turn away mode off."""
         if self._topic[CONF_AWAY_MODE_COMMAND_TOPIC] is not None:
             mqtt.async_publish(self.hass,
@@ -567,8 +639,7 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self._away = False
             self.async_schedule_update_ha_state()
 
-    @asyncio.coroutine
-    def async_set_hold_mode(self, hold_mode):
+    async def async_set_hold_mode(self, hold_mode):
         """Update hold mode on."""
         if self._topic[CONF_HOLD_COMMAND_TOPIC] is not None:
             mqtt.async_publish(self.hass,
@@ -579,8 +650,7 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self._hold = hold_mode
             self.async_schedule_update_ha_state()
 
-    @asyncio.coroutine
-    def async_turn_aux_heat_on(self):
+    async def async_turn_aux_heat_on(self):
         """Turn auxiliary heater on."""
         if self._topic[CONF_AUX_COMMAND_TOPIC] is not None:
             mqtt.async_publish(self.hass, self._topic[CONF_AUX_COMMAND_TOPIC],
@@ -590,8 +660,7 @@ class MqttClimate(MqttAvailability, ClimateDevice):
             self._aux = True
             self.async_schedule_update_ha_state()
 
-    @asyncio.coroutine
-    def async_turn_aux_heat_off(self):
+    async def async_turn_aux_heat_off(self):
         """Turn auxiliary heater off."""
         if self._topic[CONF_AUX_COMMAND_TOPIC] is not None:
             mqtt.async_publish(self.hass, self._topic[CONF_AUX_COMMAND_TOPIC],

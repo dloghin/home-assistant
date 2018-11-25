@@ -1,6 +1,7 @@
 """Helpers to execute scripts."""
 
 import logging
+from contextlib import suppress
 from itertools import islice
 from typing import Optional, Sequence
 
@@ -95,7 +96,9 @@ class Script():
                 def async_script_delay(now):
                     """Handle delay."""
                     # pylint: disable=cell-var-from-loop
-                    self._async_listener.remove(unsub)
+                    with suppress(ValueError):
+                        self._async_listener.remove(unsub)
+
                     self.hass.async_create_task(
                         self.async_run(variables, context))
 
@@ -107,10 +110,19 @@ class Script():
                             cv.time_period,
                             cv.positive_timedelta)(
                                 delay.async_render(variables))
+                    elif isinstance(delay, dict):
+                        delay_data = {}
+                        delay_data.update(
+                            template.render_complex(delay, variables))
+                        delay = cv.time_period(delay_data)
                 except (TemplateError, vol.Invalid) as ex:
                     _LOGGER.error("Error rendering '%s' delay template: %s",
                                   self.name, ex)
                     break
+
+                self.last_action = action.get(
+                    CONF_ALIAS, 'delay {}'.format(delay))
+                self._log("Executing step %s" % self.last_action)
 
                 unsub = async_track_point_in_utc_time(
                     self.hass, async_script_delay,
@@ -127,6 +139,9 @@ class Script():
                 # Call ourselves in the future to continue work
                 wait_template = action[CONF_WAIT_TEMPLATE]
                 wait_template.hass = self.hass
+
+                self.last_action = action.get(CONF_ALIAS, 'wait template')
+                self._log("Executing step %s" % self.last_action)
 
                 # check if condition already okay
                 if condition.async_template(
@@ -235,7 +250,8 @@ class Script():
         @callback
         def async_script_timeout(now):
             """Call after timeout is retrieve."""
-            self._async_listener.remove(unsub)
+            with suppress(ValueError):
+                self._async_listener.remove(unsub)
 
             # Check if we want to continue to execute
             # the script after the timeout
