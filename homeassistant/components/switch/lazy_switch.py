@@ -95,4 +95,4 @@ class LazySwitch(SwitchDevice):
 
 	def update(self):		
 		self._state = self._dev.get_switch_state(self._slot)
-		print("Lazy Switch Update slot " + str(self._slot) + " value " + str(self._state))
+		print("Lazy Switch " + self._name + " Update slot " + str(self._slot) + " value " + str(self._state))
